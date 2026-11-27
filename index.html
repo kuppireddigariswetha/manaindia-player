@@ -1,0 +1,248 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mana India - Continuous Player</title>
+  <style>
+    body {
+      background: #111;
+      color: white;
+      font-family: Arial;
+      text-align: center;
+      padding: 12px;
+    }
+    #player {
+      width: 100%;
+      aspect-ratio: 16/9;
+    }
+    button {
+      padding: 14px 22px;
+      margin: 8px;
+      font-size: 16px;
+    }
+  </style>
+</head>
+<body>
+
+<h2>Mana India Official</h2>
+<p>Newest to oldest | Long videos</p>
+
+<div id="player"></div>
+
+<p id="status">Ready to load videos</p>
+<button onclick="startPlayback()">START PLAYBACK</button>
+<button onclick="pausePlayback()">PAUSE</button>
+<button onclick="resumePlayback()">RESUME</button>
+
+<script>
+const API_KEY = "AIzaSyAix55oPzfkxeU0FPX8rvMsCRztVYMUqr0";
+const CHANNEL_ID = "UC9Q7_DzbBQaSuc1BmUCWfhQ";
+const UPLOADS_ID = "UU9Q7_DzbBQaSuc1BmUCWfhQ";
+
+// Videos longer than 180 seconds.
+// This is an approximation for excluding Shorts.
+const MIN_DURATION = 180;
+
+let player;
+let videoIds = [];
+let pauseTimer = null;
+let resumeTimer = null;
+let isRunning = false;
+let isAutoPausing = false;
+let wakeLock = null;
+
+function durationSeconds(iso) {
+  const match = iso.match(
+    /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/
+  );
+  return (Number(match[1] || 0) * 3600) +
+         (Number(match[2] || 0) * 60) +
+         Number(match[3] || 0);
+}
+
+async function getAllVideos() {
+  let token = "";
+  let ids = [];
+
+  do {
+    const url = new URL(
+      "https://www.googleapis.com/youtube/v3/playlistItems"
+    );
+
+    url.search = new URLSearchParams({
+      part: "contentDetails",
+      playlistId: UPLOADS_ID,
+      maxResults: "50",
+      key: API_KEY,
+      ...(token ? {pageToken: token} : {})
+    });
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error?.message || "Playlist loading failed");
+    }
+
+    ids.push(...(data.items || []).map(
+      item => item.contentDetails.videoId
+    ));
+
+    token = data.nextPageToken || "";
+  } while (token);
+
+  return ids;
+}
+
+async function getLongVideos(ids) {
+  let longVideos = [];
+
+  for (let i = 0; i < ids.length; i += 50) {
+    const batch = ids.slice(i, i + 50);
+
+    const url = new URL(
+      "https://www.googleapis.com/youtube/v3/videos"
+    );
+
+    url.search = new URLSearchParams({
+      part: "contentDetails",
+      id: batch.join(","),
+      key: API_KEY
+    });
+
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (!response.ok) {
+      throw new Error(data.error?.message || "Video loading failed");
+    }
+
+    const durations = new Map(
+      (data.items || []).map(v => [
+        v.id,
+        durationSeconds(v.contentDetails.duration)
+      ])
+    );
+
+    longVideos.push(
+      ...batch.filter(id =>
+        (durations.get(id) || 0) > MIN_DURATION
+      )
+    );
+  }
+
+  return longVideos;
+}
+
+function onYouTubeIframeAPIReady() {
+  player = new YT.Player("player", {
+    width: "100%",
+    height: "100%",
+    playerVars: {
+      playsinline: 1,
+      autoplay: 0,
+      rel: 0
+    },
+    events: {
+      onReady: () => {
+        document.getElementById("status").textContent =
+          "Player ready. Press START PLAYBACK.";
+      },
+      onStateChange: onPlayerStateChange
+    }
+  });
+}
+
+async function startPlayback() {
+  try {
+    if (!API_KEY || API_KEY === "YOUR_YOUTUBE_API_KEY") {
+      throw new Error("Please add your YouTube API key.");
+    }
+
+    document.getElementById("status").textContent =
+      "Loading channel videos...";
+
+    const ids = await getAllVideos();
+    videoIds = await getLongVideos(ids);
+
+    if (!videoIds.length) {
+      throw new Error("No qualifying long videos found.");
+    }
+
+    isRunning = true;
+
+    if ("wakeLock" in navigator) {
+      try {
+        wakeLock = await navigator.wakeLock.request("screen");
+      } catch (e) {}
+    }
+
+    player.loadPlaylist({
+      playlist: videoIds,
+      index: 0,
+      startSeconds: 0
+    });
+
+    document.getElementById("status").textContent =
+      videoIds.length + " long videos loaded.";
+
+  } catch (error) {
+    document.getElementById("status").textContent =
+      error.message;
+  }
+}
+
+function onPlayerStateChange(event) {
+  if (event.data === YT.PlayerState.PLAYING) {
+    document.getElementById("status").textContent =
+      "Playing videos automatically";
+
+    if (isRunning && !isAutoPausing) {
+      clearInterval(pauseTimer);
+
+      pauseTimer = setInterval(() => {
+        if (!isRunning ||
+            player.getPlayerState() !== YT.PlayerState.PLAYING) {
+          return;
+        }
+
+        isAutoPausing = true;
+        player.pauseVideo();
+
+        clearTimeout(resumeTimer);
+        resumeTimer = setTimeout(() => {
+          isAutoPausing = false;
+
+          if (isRunning) {
+            player.playVideo();
+          }
+        }, 2000);
+
+      }, 120000);
+    }
+  }
+}
+
+function pausePlayback() {
+  isRunning = false;
+  clearInterval(pauseTimer);
+  clearTimeout(resumeTimer);
+  isAutoPausing = false;
+  player.pauseVideo();
+  document.getElementById("status").textContent =
+    "Manually paused";
+}
+
+function resumePlayback() {
+  isRunning = true;
+  player.playVideo();
+  document.getElementById("status").textContent =
+    "Resuming playback";
+}
+
+</script>
+
+<script src="https://www.youtube.com/iframe_api"></script>
+</body>
+</html>
